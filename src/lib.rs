@@ -1045,3 +1045,298 @@ pub fn gamma_rgb_to_okhsv(rgb: RGB, gamma: f32) -> HSV {
 
     HSV { h, s, v }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f32 = 1e-5;
+
+    fn approx_eq(a: f32, b: f32, epsilon: f32) -> bool {
+        (a - b).abs() < epsilon
+    }
+
+    fn rgb_approx_eq(a: RGB, b: RGB, epsilon: f32) -> bool {
+        approx_eq(a.r, b.r, epsilon) && approx_eq(a.g, b.g, epsilon) && approx_eq(a.b, b.b, epsilon)
+    }
+
+    fn hsl_approx_eq(a: HSL, b: HSL, epsilon: f32) -> bool {
+        approx_eq(a.h, b.h, epsilon) && approx_eq(a.s, b.s, epsilon) && approx_eq(a.l, b.l, epsilon)
+    }
+
+    fn hsv_approx_eq(a: HSV, b: HSV, epsilon: f32) -> bool {
+        approx_eq(a.h, b.h, epsilon) && approx_eq(a.s, b.s, epsilon) && approx_eq(a.v, b.v, epsilon)
+    }
+
+    fn lab_approx_eq(a: Lab, b: Lab, epsilon: f32) -> bool {
+        approx_eq(a.l, b.l, epsilon) && approx_eq(a.a, b.a, epsilon) && approx_eq(a.b, b.b, epsilon)
+    }
+
+    #[test]
+    fn test_clamp() {
+        assert_eq!(clamp(0.5, 0.0, 1.0), 0.5);
+        assert_eq!(clamp(-0.5, 0.0, 1.0), 0.0);
+        assert_eq!(clamp(1.5, 0.0, 1.0), 1.0);
+        assert_eq!(clamp(0.3, 0.2, 0.8), 0.3);
+    }
+
+    #[test]
+    fn test_sgn() {
+        assert_eq!(sgn(5.0), 1.0);
+        assert_eq!(sgn(-5.0), -1.0);
+        assert_eq!(sgn(0.0), 0.0);
+    }
+
+    #[test]
+    fn test_toe_toe_inv_roundtrip() {
+        let values = [0.0, 0.25, 0.5, 0.75, 1.0];
+        for &val in &values {
+            let toe_val = toe(val);
+            let recovered = toe_inv(toe_val);
+            assert!(approx_eq(recovered, val, EPSILON),
+                "toe/toe_inv roundtrip failed for {}: got {}", val, recovered);
+        }
+    }
+
+    #[test]
+    fn test_srgb_transfer_roundtrip() {
+        let values = [0.0, 0.001, 0.01, 0.1, 0.5, 0.9, 1.0];
+        for &val in &values {
+            let gamma = srgb_transfer_function(val);
+            let linear = srgb_transfer_function_inv(gamma);
+            assert!(approx_eq(linear, val, EPSILON),
+                "sRGB transfer roundtrip failed for {}: got {}", val, linear);
+        }
+    }
+
+    #[test]
+    fn test_gamma_transfer_roundtrip() {
+        let values = [0.0, 0.1, 0.5, 0.9, 1.0];
+        let gammas = [1.0, 1.8, 2.2, 2.4];
+
+        for &gamma in &gammas {
+            for &val in &values {
+                let corrected = gamma_transfer_function(val, gamma);
+                let linear = gamma_transfer_function_inv(corrected, gamma);
+                assert!(approx_eq(linear, val, EPSILON),
+                    "Gamma {} transfer roundtrip failed for {}: got {}", gamma, val, linear);
+            }
+        }
+    }
+
+    #[test]
+    fn test_linear_srgb_oklab_roundtrip() {
+        let test_colors = [
+            RGB { r: 1.0, g: 0.0, b: 0.0 },  // Red
+            RGB { r: 0.0, g: 1.0, b: 0.0 },  // Green
+            RGB { r: 0.0, g: 0.0, b: 1.0 },  // Blue
+            RGB { r: 1.0, g: 1.0, b: 1.0 },  // White
+            RGB { r: 0.5, g: 0.5, b: 0.5 },  // Gray
+            RGB { r: 0.3, g: 0.7, b: 0.2 },  // Random
+        ];
+
+        for color in &test_colors {
+            let lab = linear_srgb_to_oklab(*color);
+            let recovered = oklab_to_linear_srgb(lab);
+            assert!(rgb_approx_eq(*color, recovered, 1e-4),
+                "RGB->Oklab->RGB roundtrip failed for {:?}: got {:?}", color, recovered);
+        }
+    }
+
+    #[test]
+    fn test_okhsl_srgb_black() {
+        let black_hsl = HSL { h: 0.0, s: 0.0, l: 0.0 };
+        let rgb = okhsl_to_srgb(black_hsl);
+        assert!(rgb_approx_eq(rgb, RGB { r: 0.0, g: 0.0, b: 0.0 }, EPSILON),
+            "Black OKHSL should convert to black sRGB");
+    }
+
+    #[test]
+    fn test_okhsl_srgb_white() {
+        let white_hsl = HSL { h: 0.0, s: 0.0, l: 1.0 };
+        let rgb = okhsl_to_srgb(white_hsl);
+        assert!(rgb_approx_eq(rgb, RGB { r: 1.0, g: 1.0, b: 1.0 }, EPSILON),
+            "White OKHSL should convert to white sRGB");
+    }
+
+    #[test]
+    fn test_okhsl_srgb_roundtrip() {
+        let test_hsl = [
+            HSL { h: 0.0, s: 1.0, l: 0.5 },   // Red
+            HSL { h: 0.333, s: 1.0, l: 0.5 }, // Green
+            HSL { h: 0.667, s: 1.0, l: 0.5 }, // Blue
+            HSL { h: 0.5, s: 0.5, l: 0.5 },   // Cyan-ish
+            HSL { h: 0.1, s: 0.8, l: 0.6 },   // Orange-ish
+        ];
+
+        for hsl in &test_hsl {
+            let rgb = okhsl_to_srgb(*hsl);
+            let recovered = srgb_to_okhsl(rgb);
+            assert!(hsl_approx_eq(*hsl, recovered, 1e-3),
+                "OKHSL->sRGB->OKHSL roundtrip failed for {:?}: got {:?}", hsl, recovered);
+        }
+    }
+
+    #[test]
+    fn test_okhsv_srgb_roundtrip() {
+        let test_hsv = [
+            HSV { h: 0.0, s: 1.0, v: 1.0 },   // Red
+            HSV { h: 0.333, s: 1.0, v: 1.0 }, // Green
+            HSV { h: 0.667, s: 1.0, v: 1.0 }, // Blue
+            HSV { h: 0.5, s: 0.5, v: 0.8 },   // Cyan-ish
+            HSV { h: 0.1, s: 0.8, v: 0.6 },   // Orange-ish
+        ];
+
+        for hsv in &test_hsv {
+            let rgb = okhsv_to_srgb(*hsv);
+            let recovered = srgb_to_okhsv(rgb);
+            assert!(hsv_approx_eq(*hsv, recovered, 1e-3),
+                "OKHSV->sRGB->OKHSV roundtrip failed for {:?}: got {:?}", hsv, recovered);
+        }
+    }
+
+    #[test]
+    fn test_gamma_rgb_conversions() {
+        let linear = RGB { r: 0.5, g: 0.3, b: 0.8 };
+        let gamma = 2.2;
+
+        let gamma_corrected = linear_rgb_to_gamma_rgb(linear, gamma);
+        let recovered = gamma_rgb_to_linear_rgb(gamma_corrected, gamma);
+
+        assert!(rgb_approx_eq(linear, recovered, EPSILON),
+            "Linear->Gamma->Linear roundtrip failed");
+    }
+
+    #[test]
+    fn test_okhsl_gamma_rgb_roundtrip() {
+        let hsl = HSL { h: 0.5, s: 0.7, l: 0.6 };
+        let gamma = 2.2;
+
+        let rgb = okhsl_to_gamma_rgb(hsl, gamma);
+        let recovered = gamma_rgb_to_okhsl(rgb, gamma);
+
+        assert!(hsl_approx_eq(hsl, recovered, 1e-3),
+            "OKHSL->Gamma RGB->OKHSL roundtrip failed for gamma {}", gamma);
+    }
+
+    #[test]
+    fn test_okhsv_gamma_rgb_roundtrip() {
+        let hsv = HSV { h: 0.3, s: 0.8, v: 0.7 };
+        let gamma = 2.4;
+
+        let rgb = okhsv_to_gamma_rgb(hsv, gamma);
+        let recovered = gamma_rgb_to_okhsv(rgb, gamma);
+
+        assert!(hsv_approx_eq(hsv, recovered, 1e-3),
+            "OKHSV->Gamma RGB->OKHSV roundtrip failed for gamma {}", gamma);
+    }
+
+    #[test]
+    fn test_gamut_clip_preserve_chroma_in_gamut() {
+        let in_gamut = RGB { r: 0.5, g: 0.3, b: 0.8 };
+        let clipped = gamut_clip_preserve_chroma(in_gamut);
+        assert!(rgb_approx_eq(in_gamut, clipped, EPSILON),
+            "In-gamut color should not be clipped");
+    }
+
+    #[test]
+    fn test_gamut_clip_out_of_gamut() {
+        let out_of_gamut = RGB { r: 1.5, g: -0.2, b: 0.5 };
+        let clipped = gamut_clip_preserve_chroma(out_of_gamut);
+
+        // Should be in valid range
+        assert!(clipped.r >= 0.0 && clipped.r <= 1.0);
+        assert!(clipped.g >= 0.0 && clipped.g <= 1.0);
+        assert!(clipped.b >= 0.0 && clipped.b <= 1.0);
+    }
+
+    #[test]
+    fn test_linear_to_srgb_conversion() {
+        let linear = RGB { r: 0.5, g: 0.3, b: 0.8 };
+        let srgb = linear_rgb_to_srgb(linear);
+        let recovered = srgb_to_linear_rgb(srgb);
+
+        assert!(rgb_approx_eq(linear, recovered, EPSILON),
+            "linear_rgb_to_srgb/srgb_to_linear_rgb roundtrip failed");
+    }
+
+    #[test]
+    fn test_compute_max_saturation() {
+        // Test for red hue (a=1, b=0)
+        let s_red = compute_max_saturation(1.0, 0.0);
+        assert!(s_red > 0.0, "Max saturation for red should be positive");
+
+        // Test for green hue
+        let s_green = compute_max_saturation(-0.5, 0.866);
+        assert!(s_green > 0.0, "Max saturation for green should be positive");
+
+        // Test for blue hue
+        let s_blue = compute_max_saturation(-0.5, -0.866);
+        assert!(s_blue > 0.0, "Max saturation for blue should be positive");
+    }
+
+    #[test]
+    fn test_find_cusp() {
+        // Test for red hue
+        let cusp = find_cusp(1.0, 0.0);
+        assert!(cusp.l > 0.0 && cusp.l < 1.0, "L_cusp should be in (0, 1)");
+        assert!(cusp.c > 0.0, "C_cusp should be positive");
+
+        // Test ST conversion
+        let st = to_st(cusp);
+        assert!(st.s > 0.0, "S should be positive");
+        assert!(st.t > 0.0, "T should be positive");
+    }
+
+    #[test]
+    fn test_get_st_mid() {
+        let st_mid = get_st_mid(1.0, 0.0);
+        assert!(st_mid.s > 0.0, "S_mid should be positive");
+        assert!(st_mid.t > 0.0, "T_mid should be positive");
+    }
+
+    #[test]
+    fn test_get_cs() {
+        let cs = get_cs(0.5, 1.0, 0.0);
+        assert!(cs.c_0 > 0.0, "C_0 should be positive");
+        assert!(cs.c_mid > 0.0, "C_mid should be positive");
+        assert!(cs.c_max > 0.0, "C_max should be positive");
+        // C_mid should generally be <= C_max (max chroma in gamut)
+        assert!(cs.c_mid <= cs.c_max, "C_mid should be <= C_max");
+    }
+
+    #[test]
+    fn test_known_color_red() {
+        // Pure red in sRGB should have hue near 0
+        let red = RGB { r: 1.0, g: 0.0, b: 0.0 };
+        let hsl = srgb_to_okhsl(red);
+        assert!(hsl.h < 0.1 || hsl.h > 0.9, "Red hue should be near 0/1");
+        assert!(hsl.s > 0.5, "Red should be saturated");
+    }
+
+    #[test]
+    fn test_known_color_green() {
+        // Pure green in sRGB
+        let green = RGB { r: 0.0, g: 1.0, b: 0.0 };
+        let hsl = srgb_to_okhsl(green);
+        assert!(hsl.h > 0.2 && hsl.h < 0.5, "Green hue should be around 0.33");
+        assert!(hsl.s > 0.5, "Green should be saturated");
+    }
+
+    #[test]
+    fn test_known_color_blue() {
+        // Pure blue in sRGB
+        let blue = RGB { r: 0.0, g: 0.0, b: 1.0 };
+        let hsl = srgb_to_okhsl(blue);
+        assert!(hsl.h > 0.5 && hsl.h < 0.8, "Blue hue should be around 0.67");
+        assert!(hsl.s > 0.5, "Blue should be saturated");
+    }
+
+    #[test]
+    fn test_gray_desaturation() {
+        // Gray colors should have very low saturation
+        let gray = RGB { r: 0.5, g: 0.5, b: 0.5 };
+        let hsl = srgb_to_okhsl(gray);
+        assert!(hsl.s < 0.01, "Gray should have near-zero saturation, got {}", hsl.s);
+    }
+}
