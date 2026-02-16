@@ -1,8 +1,9 @@
 # okhsl-embedded
+Bart Massey 2026
 
-A `no_std` Rust implementation of OKHSL and OKHSV color space
-conversions with f32 floats, based on Björn Ottosson's ok_color
-library.
+A `no_std` Rust implementation of OKHSL and OKHSV color
+space conversions with f32 floats, derived from Björn
+Ottosson's C++ `ok_color` code.
 
 ## Features
 
@@ -17,9 +18,9 @@ library.
 Add to your `Cargo.toml`:
 
 ```toml
-[dependencies]
-okhsl-embedded = "0.1"
-libm = "0.2"
+[dependencies.okhsl-embedded]
+version = "0.1"
+git = "https://github.com/BartMassey/okhsl-embedded"
 ```
 
 ## Example
@@ -33,6 +34,8 @@ let rgb = okhsl_to_srgb(hsl);
 
 ## License
 
-MIT License - Copyright (c) 2021 Björn Ottosson
+* Original: MIT License - Copyright (c) 2021 Björn Ottosson
 
-See ok_color.h for original implementation and full license text.
+  See `cpp-src/ok_color.h` for original implementation and full license text.
+
+* This work: MIT License - Copyright (c) 2026 Bart Massey
