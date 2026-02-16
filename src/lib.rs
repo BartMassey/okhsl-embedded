@@ -17,60 +17,152 @@
 // SOFTWARE.
 
 #![no_std]
+#![warn(missing_docs)]
+#![allow(clippy::excessive_precision)]
 
+//! A `no_std` Rust implementation of OKHSL and OKHSV color space conversions.
+//!
+//! This library provides perceptually uniform color spaces (OKHSL and OKHSV) based on
+//! Björn Ottosson's Oklab color space. All functions use f32 floating point and are
+//! compatible with embedded systems.
+//!
+//! # Features
+//!
+//! - `no_std` compatible for embedded systems
+//! - OKHSL, OKHSV, and Oklab color spaces
+//! - sRGB and custom gamma correction
+//! - Multiple gamut clipping strategies
+//! - Perceptually uniform color manipulation
+//!
+//! # Example
+//!
+//! ```
+//! use okhsl_embedded::{HSL, RGB, okhsl_to_srgb, srgb_to_okhsl};
+//!
+//! // Convert OKHSL to sRGB
+//! let hsl = HSL { h: 0.5, s: 0.8, l: 0.6 };
+//! let rgb = okhsl_to_srgb(hsl);
+//!
+//! // Convert back
+//! let hsl2 = srgb_to_okhsl(rgb);
+//! ```
+//!
+//! # Color Spaces
+//!
+//! - **Oklab**: Perceptually uniform color space with L (lightness), a, b (chromaticity)
+//! - **OKHSL**: Hue, Saturation, Lightness in perceptually uniform space
+//! - **OKHSV**: Hue, Saturation, Value in perceptually uniform space
+//! - **sRGB**: Standard RGB color space with gamma correction
+//!
+//! # References
+//!
+//! Original implementation: <https://bottosson.github.io/posts/oklab/>
+
+use core::f32::consts::PI;
 use libm::{atan2f, cbrtf, cosf, fmaxf, fminf, powf, sinf, sqrtf};
 
+/// Lab color in Oklab color space
+///
+/// Oklab is a perceptually uniform color space with:
+/// - `l`: Perceived lightness (0.0 to 1.0)
+/// - `a`: Green-red axis
+/// - `b`: Blue-yellow axis
 #[derive(Debug, Clone, Copy)]
 pub struct Lab {
+    /// Perceived lightness (0.0 to 1.0)
     pub l: f32,
+    /// Green-red axis
     pub a: f32,
+    /// Blue-yellow axis
     pub b: f32,
 }
 
+/// RGB color representation with linear or gamma-corrected values
+///
+/// Values typically range from 0.0 to 1.0. The interpretation (linear vs gamma-corrected)
+/// depends on the conversion function used.
 #[derive(Debug, Clone, Copy)]
 pub struct RGB {
+    /// Red component (0.0 to 1.0)
     pub r: f32,
+    /// Green component (0.0 to 1.0)
     pub g: f32,
+    /// Blue component (0.0 to 1.0)
     pub b: f32,
 }
 
+/// HSV color in Okhsv color space
+///
+/// Okhsv provides a perceptually uniform hue-saturation-value representation:
+/// - `h`: Hue (0.0 to 1.0, wraps around)
+/// - `s`: Saturation (0.0 to 1.0, where 0 is gray and 1 is fully saturated)
+/// - `v`: Value/brightness (0.0 to 1.0, where 0 is black and 1 is maximum brightness)
 #[derive(Debug, Clone, Copy)]
 pub struct HSV {
+    /// Hue (0.0 to 1.0, wraps around)
     pub h: f32,
+    /// Saturation (0.0 to 1.0)
     pub s: f32,
+    /// Value/brightness (0.0 to 1.0)
     pub v: f32,
 }
 
+/// HSL color in Okhsl color space
+///
+/// Okhsl provides a perceptually uniform hue-saturation-lightness representation:
+/// - `h`: Hue (0.0 to 1.0, wraps around)
+/// - `s`: Saturation (0.0 to 1.0, where 0 is gray and 1 is fully saturated)
+/// - `l`: Lightness (0.0 to 1.0, where 0 is black, 0.5 is mid-tone, 1 is white)
 #[derive(Debug, Clone, Copy)]
 pub struct HSL {
+    /// Hue (0.0 to 1.0, wraps around)
     pub h: f32,
+    /// Saturation (0.0 to 1.0)
     pub s: f32,
+    /// Lightness (0.0 to 1.0)
     pub l: f32,
 }
 
+/// Lightness and chroma pair
+///
+/// Represents a color's position in the gamut by its lightness and chroma values:
+/// - `l`: Lightness component
+/// - `c`: Chroma (colorfulness) component
 #[derive(Debug, Clone, Copy)]
 pub struct LC {
+    /// Lightness component
     pub l: f32,
+    /// Chroma component
     pub c: f32,
 }
 
-// Alternative representation of (L_cusp, C_cusp)
-// Encoded so S = C_cusp/L_cusp and T = C_cusp/(1-L_cusp)
-// The maximum value for C in the triangle is then found as fmin(S*L, T*(1-L)), for a given L
+/// Alternative representation of (L_cusp, C_cusp)
+///
+/// Encoded so S = C_cusp/L_cusp and T = C_cusp/(1-L_cusp).
+/// The maximum value for C in the triangle is then found as fmin(S*L, T*(1-L)), for a given L.
 #[derive(Debug, Clone, Copy)]
 pub struct ST {
+    /// S parameter: C_cusp/L_cusp
     pub s: f32,
+    /// T parameter: C_cusp/(1-L_cusp)
     pub t: f32,
 }
 
+/// Chroma boundaries for a given hue and lightness
+///
+/// Contains the minimum, mid-range, and maximum chroma values:
+/// - `c_0`: Minimum chroma
+/// - `c_mid`: Mid-range chroma
+/// - `c_max`: Maximum chroma
 #[derive(Debug, Clone, Copy)]
 pub struct Cs {
+    /// Minimum chroma
     pub c_0: f32,
+    /// Mid-range chroma
     pub c_mid: f32,
+    /// Maximum chroma
     pub c_max: f32,
 }
-
-const PI: f32 = 3.1415926535897932384626433832795028841971693993751058209749445923078164062f32;
 
 #[inline]
 fn clamp(x: f32, min: f32, max: f32) -> f32 {
@@ -129,6 +221,15 @@ pub fn gamma_transfer_function_inv(a: f32, gamma: f32) -> f32 {
 }
 
 /// Converts linear RGB to gamma-corrected RGB
+///
+/// # Parameters
+///
+/// * `rgb` - Linear RGB color to convert
+/// * `gamma` - Gamma value (typical: 2.2 for displays, 2.4 for sRGB, 1.8 for Mac)
+///
+/// # Returns
+///
+/// Gamma-corrected RGB color
 pub fn linear_rgb_to_gamma_rgb(rgb: RGB, gamma: f32) -> RGB {
     RGB {
         r: gamma_transfer_function(rgb.r, gamma),
@@ -138,6 +239,15 @@ pub fn linear_rgb_to_gamma_rgb(rgb: RGB, gamma: f32) -> RGB {
 }
 
 /// Converts gamma-corrected RGB to linear RGB
+///
+/// # Parameters
+///
+/// * `rgb` - Gamma-corrected RGB color to convert
+/// * `gamma` - Gamma value (typical: 2.2 for displays, 2.4 for sRGB, 1.8 for Mac)
+///
+/// # Returns
+///
+/// Linear RGB color
 pub fn gamma_rgb_to_linear_rgb(rgb: RGB, gamma: f32) -> RGB {
     RGB {
         r: gamma_transfer_function_inv(rgb.r, gamma),
@@ -146,7 +256,18 @@ pub fn gamma_rgb_to_linear_rgb(rgb: RGB, gamma: f32) -> RGB {
     }
 }
 
-/// Converts linear RGB to standard sRGB (convenience function)
+/// Converts linear RGB to standard sRGB
+///
+/// Applies the sRGB transfer function (gamma correction with special handling
+/// for dark values) to convert from linear RGB to sRGB.
+///
+/// # Parameters
+///
+/// * `rgb` - Linear RGB color to convert
+///
+/// # Returns
+///
+/// sRGB color with gamma correction applied
 pub fn linear_rgb_to_srgb(rgb: RGB) -> RGB {
     RGB {
         r: srgb_transfer_function(rgb.r),
@@ -155,7 +276,17 @@ pub fn linear_rgb_to_srgb(rgb: RGB) -> RGB {
     }
 }
 
-/// Converts standard sRGB to linear RGB (convenience function)
+/// Converts standard sRGB to linear RGB
+///
+/// Applies the inverse sRGB transfer function to convert from sRGB to linear RGB.
+///
+/// # Parameters
+///
+/// * `rgb` - sRGB color to convert
+///
+/// # Returns
+///
+/// Linear RGB color
 pub fn srgb_to_linear_rgb(rgb: RGB) -> RGB {
     RGB {
         r: srgb_transfer_function_inv(rgb.r),
@@ -164,6 +295,15 @@ pub fn srgb_to_linear_rgb(rgb: RGB) -> RGB {
     }
 }
 
+/// Converts linear sRGB to Oklab color space
+///
+/// # Parameters
+///
+/// * `c` - Linear sRGB color to convert
+///
+/// # Returns
+///
+/// Oklab color representation
 pub fn linear_srgb_to_oklab(c: RGB) -> Lab {
     let l = 0.4122214708f32 * c.r + 0.5363325363f32 * c.g + 0.0514459929f32 * c.b;
     let m = 0.2119034982f32 * c.r + 0.6806995451f32 * c.g + 0.1073969566f32 * c.b;
@@ -180,6 +320,15 @@ pub fn linear_srgb_to_oklab(c: RGB) -> Lab {
     }
 }
 
+/// Converts Oklab to linear sRGB color space
+///
+/// # Parameters
+///
+/// * `c` - Oklab color to convert
+///
+/// # Returns
+///
+/// Linear sRGB color representation (may be out of gamut)
 pub fn oklab_to_linear_srgb(c: Lab) -> RGB {
     let l_ = c.l + 0.3963377774f32 * c.a + 0.2158037573f32 * c.b;
     let m_ = c.l - 0.1055613458f32 * c.a - 0.0638541728f32 * c.b;
@@ -196,9 +345,18 @@ pub fn oklab_to_linear_srgb(c: Lab) -> RGB {
     }
 }
 
-// Finds the maximum saturation possible for a given hue that fits in sRGB
-// Saturation here is defined as S = C/L
-// a and b must be normalized so a^2 + b^2 == 1
+/// Finds the maximum saturation possible for a given hue that fits in sRGB
+///
+/// Saturation here is defined as S = C/L.
+///
+/// # Parameters
+///
+/// * `a` - Normalized a component (must satisfy a² + b² = 1)
+/// * `b` - Normalized b component (must satisfy a² + b² = 1)
+///
+/// # Returns
+///
+/// Maximum saturation value for the given hue
 pub fn compute_max_saturation(a: f32, b: f32) -> f32 {
     // Max saturation will be when one of r, g or b goes below zero.
 
@@ -273,14 +431,24 @@ pub fn compute_max_saturation(a: f32, b: f32) -> f32 {
         let f1 = wl * l_ds + wm * m_ds + ws * s_ds;
         let f2 = wl * l_ds2 + wm * m_ds2 + ws * s_ds2;
 
-        s = s - f * f1 / (f1 * f1 - 0.5f32 * f * f2);
+        s -= f * f1 / (f1 * f1 - 0.5f32 * f * f2);
     }
 
     s
 }
 
-// finds L_cusp and C_cusp for a given hue
-// a and b must be normalized so a^2 + b^2 == 1
+/// Finds L_cusp and C_cusp for a given hue
+///
+/// The cusp is the point of maximum chroma for a given hue.
+///
+/// # Parameters
+///
+/// * `a` - Normalized a component (must satisfy a² + b² = 1)
+/// * `b` - Normalized b component (must satisfy a² + b² = 1)
+///
+/// # Returns
+///
+/// LC struct containing the lightness and chroma at the cusp
 pub fn find_cusp(a: f32, b: f32) -> LC {
     // First, find the maximum saturation (saturation S = C/L)
     let s_cusp = compute_max_saturation(a, b);
@@ -300,13 +468,27 @@ pub fn find_cusp(a: f32, b: f32) -> LC {
     }
 }
 
-// Finds intersection of the line defined by
-// L = L0 * (1 - t) + t * L1;
-// C = t * C1;
-// a and b must be normalized so a^2 + b^2 == 1
+/// Finds intersection of a line with the sRGB gamut boundary
+///
+/// The line is defined by:
+/// - L = L0 * (1 - t) + t * L1
+/// - C = t * C1
+///
+/// # Parameters
+///
+/// * `a` - Normalized a component (must satisfy a² + b² = 1)
+/// * `b` - Normalized b component (must satisfy a² + b² = 1)
+/// * `l1` - Target lightness
+/// * `c1` - Target chroma
+/// * `l0` - Starting lightness
+/// * `cusp` - The cusp point for this hue
+///
+/// # Returns
+///
+/// Parameter t at the gamut intersection
 pub fn find_gamut_intersection(a: f32, b: f32, l1: f32, c1: f32, l0: f32, cusp: LC) -> f32 {
     // Find the intersection for upper and lower half separately
-    let mut t = if ((l1 - l0) * cusp.c - (cusp.l - l0) * c1) <= 0.0f32 {
+    if ((l1 - l0) * cusp.c - (cusp.l - l0) * c1) <= 0.0f32 {
         // Lower half
         cusp.c * l0 / (c1 * cusp.l + cusp.c * (l0 - l1))
     } else {
@@ -379,11 +561,24 @@ pub fn find_gamut_intersection(a: f32, b: f32, l1: f32, c1: f32, l0: f32, cusp: 
         }
 
         t_val
-    };
-
-    t
+    }
 }
 
+/// Finds intersection with the gamut boundary (simplified version)
+///
+/// This function computes the cusp internally before calling `find_gamut_intersection`.
+///
+/// # Parameters
+///
+/// * `a` - Normalized a component (must satisfy a² + b² = 1)
+/// * `b` - Normalized b component (must satisfy a² + b² = 1)
+/// * `l1` - Target lightness
+/// * `c1` - Target chroma
+/// * `l0` - Starting lightness
+///
+/// # Returns
+///
+/// Parameter t at the gamut intersection
 pub fn find_gamut_intersection_simple(a: f32, b: f32, l1: f32, c1: f32, l0: f32) -> f32 {
     // Find the cusp of the gamut triangle
     let cusp = find_cusp(a, b);
@@ -391,6 +586,18 @@ pub fn find_gamut_intersection_simple(a: f32, b: f32, l1: f32, c1: f32, l0: f32)
     find_gamut_intersection(a, b, l1, c1, l0, cusp)
 }
 
+/// Clips an out-of-gamut color to the sRGB gamut while preserving chroma
+///
+/// Projects colors outside the sRGB gamut onto the gamut boundary while
+/// attempting to preserve the chroma (colorfulness) as much as possible.
+///
+/// # Parameters
+///
+/// * `rgb` - Linear RGB color (may be out of gamut)
+///
+/// # Returns
+///
+/// Linear RGB color clipped to valid sRGB gamut
 pub fn gamut_clip_preserve_chroma(rgb: RGB) -> RGB {
     if rgb.r < 1.0 && rgb.g < 1.0 && rgb.b < 1.0 && rgb.r > 0.0 && rgb.g > 0.0 && rgb.b > 0.0 {
         return rgb;
@@ -417,6 +624,18 @@ pub fn gamut_clip_preserve_chroma(rgb: RGB) -> RGB {
     })
 }
 
+/// Clips an out-of-gamut color by projecting to L=0.5
+///
+/// Projects colors outside the sRGB gamut onto the gamut boundary by
+/// finding the intersection with a line toward L=0.5.
+///
+/// # Parameters
+///
+/// * `rgb` - Linear RGB color (may be out of gamut)
+///
+/// # Returns
+///
+/// Linear RGB color clipped to valid sRGB gamut
 pub fn gamut_clip_project_to_0_5(rgb: RGB) -> RGB {
     if rgb.r < 1.0 && rgb.g < 1.0 && rgb.b < 1.0 && rgb.r > 0.0 && rgb.g > 0.0 && rgb.b > 0.0 {
         return rgb;
@@ -443,6 +662,18 @@ pub fn gamut_clip_project_to_0_5(rgb: RGB) -> RGB {
     })
 }
 
+/// Clips an out-of-gamut color by projecting to L_cusp
+///
+/// Projects colors outside the sRGB gamut onto the gamut boundary by
+/// finding the intersection with a line toward the cusp lightness for the hue.
+///
+/// # Parameters
+///
+/// * `rgb` - Linear RGB color (may be out of gamut)
+///
+/// # Returns
+///
+/// Linear RGB color clipped to valid sRGB gamut
 pub fn gamut_clip_project_to_l_cusp(rgb: RGB) -> RGB {
     if rgb.r < 1.0 && rgb.g < 1.0 && rgb.b < 1.0 && rgb.r > 0.0 && rgb.g > 0.0 && rgb.b > 0.0 {
         return rgb;
@@ -473,6 +704,19 @@ pub fn gamut_clip_project_to_l_cusp(rgb: RGB) -> RGB {
     })
 }
 
+/// Clips an out-of-gamut color using adaptive L0 around 0.5
+///
+/// Uses an adaptive algorithm to determine the projection target lightness
+/// based on the alpha parameter and chroma.
+///
+/// # Parameters
+///
+/// * `rgb` - Linear RGB color (may be out of gamut)
+/// * `alpha` - Alpha parameter controlling the adaptation strength
+///
+/// # Returns
+///
+/// Linear RGB color clipped to valid sRGB gamut
 pub fn gamut_clip_adaptive_l0_0_5(rgb: RGB, alpha: f32) -> RGB {
     if rgb.r < 1.0 && rgb.g < 1.0 && rgb.b < 1.0 && rgb.r > 0.0 && rgb.g > 0.0 && rgb.b > 0.0 {
         return rgb;
@@ -501,6 +745,19 @@ pub fn gamut_clip_adaptive_l0_0_5(rgb: RGB, alpha: f32) -> RGB {
     })
 }
 
+/// Clips an out-of-gamut color using adaptive L0 around L_cusp
+///
+/// Uses an adaptive algorithm to determine the projection target lightness
+/// based on the alpha parameter, chroma, and cusp lightness.
+///
+/// # Parameters
+///
+/// * `rgb` - Linear RGB color (may be out of gamut)
+/// * `alpha` - Alpha parameter controlling the adaptation strength
+///
+/// # Returns
+///
+/// Linear RGB color clipped to valid sRGB gamut
 pub fn gamut_clip_adaptive_l0_l_cusp(rgb: RGB, alpha: f32) -> RGB {
     if rgb.r < 1.0 && rgb.g < 1.0 && rgb.b < 1.0 && rgb.r > 0.0 && rgb.g > 0.0 && rgb.b > 0.0 {
         return rgb;
@@ -550,6 +807,15 @@ fn toe_inv(x: f32) -> f32 {
     (x * x + K_1 * x) / (K_3 * (x + K_2))
 }
 
+/// Converts LC (lightness-chroma) to ST representation
+///
+/// # Parameters
+///
+/// * `cusp` - LC coordinates at the cusp
+///
+/// # Returns
+///
+/// ST representation where S = C/L and T = C/(1-L)
 pub fn to_st(cusp: LC) -> ST {
     let l = cusp.l;
     let c = cusp.c;
@@ -559,31 +825,52 @@ pub fn to_st(cusp: LC) -> ST {
     }
 }
 
-// Returns a smooth approximation of the location of the cusp
-// This polynomial was created by an optimization process
-// It has been designed so that S_mid < S_max and T_mid < T_max
+/// Returns a smooth approximation of the location of the cusp
+///
+/// This polynomial was created by an optimization process.
+/// It has been designed so that S_mid < S_max and T_mid < T_max.
+///
+/// # Parameters
+///
+/// * `a_` - Normalized a component
+/// * `b_` - Normalized b component
+///
+/// # Returns
+///
+/// ST values at the mid point
 pub fn get_st_mid(a_: f32, b_: f32) -> ST {
     let s = 0.11516993f32
         + 1.0f32
-            / (7.44778970f32 + 4.15901240f32 * b_
-                + a_
-                    * (-2.19557347f32 + 1.75198401f32 * b_
-                        + a_
-                            * (-2.13704948f32 - 10.02301043f32 * b_
-                                + a_ * (-4.24894561f32 + 5.38770819f32 * b_ + 4.69891013f32 * a_))));
+            / (7.44778970f32
+                + 4.15901240f32 * b_
+                + a_ * (-2.19557347f32
+                    + 1.75198401f32 * b_
+                    + a_ * (-2.13704948f32 - 10.02301043f32 * b_
+                        + a_ * (-4.24894561f32 + 5.38770819f32 * b_ + 4.69891013f32 * a_))));
 
     let t = 0.11239642f32
         + 1.0f32
             / (1.61320320f32 - 0.68124379f32 * b_
-                + a_
-                    * (0.40370612f32 + 0.90148123f32 * b_
-                        + a_
-                            * (-0.27087943f32 + 0.61223990f32 * b_
-                                + a_ * (0.00299215f32 - 0.45399568f32 * b_ - 0.14661872f32 * a_))));
+                + a_ * (0.40370612f32
+                    + 0.90148123f32 * b_
+                    + a_ * (-0.27087943f32
+                        + 0.61223990f32 * b_
+                        + a_ * (0.00299215f32 - 0.45399568f32 * b_ - 0.14661872f32 * a_))));
 
     ST { s, t }
 }
 
+/// Gets chroma boundaries (C_0, C_mid, C_max) for a given lightness and hue
+///
+/// # Parameters
+///
+/// * `l` - Lightness value
+/// * `a_` - Normalized a component
+/// * `b_` - Normalized b component
+///
+/// # Returns
+///
+/// Cs struct containing minimum, mid, and maximum chroma values
 pub fn get_cs(l: f32, a_: f32, b_: f32) -> Cs {
     let cusp = find_cusp(a_, b_);
 
@@ -615,13 +902,27 @@ pub fn get_cs(l: f32, a_: f32, b_: f32) -> Cs {
         sqrtf(1.0f32 / (1.0f32 / (c_a * c_a) + 1.0f32 / (c_b * c_b)))
     };
 
-    Cs {
-        c_0,
-        c_mid,
-        c_max,
-    }
+    Cs { c_0, c_mid, c_max }
 }
 
+/// Converts OKHSL color to sRGB
+///
+/// # Parameters
+///
+/// * `hsl` - OKHSL color to convert
+///
+/// # Returns
+///
+/// sRGB color with gamma correction applied
+///
+/// # Example
+///
+/// ```
+/// use okhsl_embedded::{HSL, okhsl_to_srgb};
+///
+/// let hsl = HSL { h: 0.5, s: 0.8, l: 0.6 };
+/// let rgb = okhsl_to_srgb(hsl);
+/// ```
 pub fn okhsl_to_srgb(hsl: HSL) -> RGB {
     let h = hsl.h;
     let s = hsl.s;
@@ -682,6 +983,24 @@ pub fn okhsl_to_srgb(hsl: HSL) -> RGB {
     }
 }
 
+/// Converts sRGB color to OKHSL
+///
+/// # Parameters
+///
+/// * `rgb` - sRGB color to convert
+///
+/// # Returns
+///
+/// OKHSL color representation
+///
+/// # Example
+///
+/// ```
+/// use okhsl_embedded::{RGB, srgb_to_okhsl};
+///
+/// let rgb = RGB { r: 0.5, g: 0.8, b: 0.3 };
+/// let hsl = srgb_to_okhsl(rgb);
+/// ```
 pub fn srgb_to_okhsl(rgb: RGB) -> HSL {
     let lab = linear_srgb_to_oklab(RGB {
         r: srgb_transfer_function_inv(rgb.r),
@@ -725,6 +1044,24 @@ pub fn srgb_to_okhsl(rgb: RGB) -> HSL {
     HSL { h, s, l }
 }
 
+/// Converts OKHSV color to sRGB
+///
+/// # Parameters
+///
+/// * `hsv` - OKHSV color to convert
+///
+/// # Returns
+///
+/// sRGB color with gamma correction applied
+///
+/// # Example
+///
+/// ```
+/// use okhsl_embedded::{HSV, okhsv_to_srgb};
+///
+/// let hsv = HSV { h: 0.5, s: 0.8, v: 0.9 };
+/// let rgb = okhsv_to_srgb(hsv);
+/// ```
 pub fn okhsv_to_srgb(hsv: HSV) -> RGB {
     let h = hsv.h;
     let s = hsv.s;
@@ -754,7 +1091,7 @@ pub fn okhsv_to_srgb(hsv: HSV) -> RGB {
     let c_vt = c_v * l_vt / l_v;
 
     let l_new = toe_inv(l);
-    c = c * l_new / l;
+    c *= l_new / l;
     l = l_new;
 
     let rgb_scale = oklab_to_linear_srgb(Lab {
@@ -762,10 +1099,11 @@ pub fn okhsv_to_srgb(hsv: HSV) -> RGB {
         a: a_ * c_vt,
         b: b_ * c_vt,
     });
-    let scale_l = cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
+    let scale_l =
+        cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
 
-    l = l * scale_l;
-    c = c * scale_l;
+    l *= scale_l;
+    c *= scale_l;
 
     let rgb = oklab_to_linear_srgb(Lab {
         l,
@@ -779,6 +1117,24 @@ pub fn okhsv_to_srgb(hsv: HSV) -> RGB {
     }
 }
 
+/// Converts sRGB color to OKHSV
+///
+/// # Parameters
+///
+/// * `rgb` - sRGB color to convert
+///
+/// # Returns
+///
+/// OKHSV color representation
+///
+/// # Example
+///
+/// ```
+/// use okhsl_embedded::{RGB, srgb_to_okhsv};
+///
+/// let rgb = RGB { r: 0.5, g: 0.8, b: 0.3 };
+/// let hsv = srgb_to_okhsv(rgb);
+/// ```
 pub fn srgb_to_okhsv(rgb: RGB) -> HSV {
     let lab = linear_srgb_to_oklab(RGB {
         r: srgb_transfer_function_inv(rgb.r),
@@ -815,12 +1171,11 @@ pub fn srgb_to_okhsv(rgb: RGB) -> HSV {
         a: a_ * c_vt,
         b: b_ * c_vt,
     });
-    let scale_l = cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
+    let scale_l =
+        cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
 
-    l = l / scale_l;
-    let mut c = c / scale_l;
+    l /= scale_l;
 
-    c = c * toe(l) / l;
     l = toe(l);
 
     // we can now compute v and s:
@@ -834,6 +1189,15 @@ pub fn srgb_to_okhsv(rgb: RGB) -> HSV {
 // Gamma-corrected RGB conversion functions
 
 /// Converts OKHSL to gamma-corrected RGB with custom gamma value
+///
+/// # Parameters
+///
+/// * `hsl` - OKHSL color to convert
+/// * `gamma` - Gamma value (typical: 2.2 for displays, 2.4 for sRGB, 1.8 for Mac)
+///
+/// # Returns
+///
+/// Gamma-corrected RGB color
 pub fn okhsl_to_gamma_rgb(hsl: HSL, gamma: f32) -> RGB {
     let h = hsl.h;
     let s = hsl.s;
@@ -895,6 +1259,15 @@ pub fn okhsl_to_gamma_rgb(hsl: HSL, gamma: f32) -> RGB {
 }
 
 /// Converts gamma-corrected RGB to OKHSL with custom gamma value
+///
+/// # Parameters
+///
+/// * `rgb` - Gamma-corrected RGB color to convert
+/// * `gamma` - Gamma value (typical: 2.2 for displays, 2.4 for sRGB, 1.8 for Mac)
+///
+/// # Returns
+///
+/// OKHSL color representation
 pub fn gamma_rgb_to_okhsl(rgb: RGB, gamma: f32) -> HSL {
     let lab = linear_srgb_to_oklab(RGB {
         r: gamma_transfer_function_inv(rgb.r, gamma),
@@ -939,6 +1312,15 @@ pub fn gamma_rgb_to_okhsl(rgb: RGB, gamma: f32) -> HSL {
 }
 
 /// Converts OKHSV to gamma-corrected RGB with custom gamma value
+///
+/// # Parameters
+///
+/// * `hsv` - OKHSV color to convert
+/// * `gamma` - Gamma value (typical: 2.2 for displays, 2.4 for sRGB, 1.8 for Mac)
+///
+/// # Returns
+///
+/// Gamma-corrected RGB color
 pub fn okhsv_to_gamma_rgb(hsv: HSV, gamma: f32) -> RGB {
     let h = hsv.h;
     let s = hsv.s;
@@ -968,7 +1350,7 @@ pub fn okhsv_to_gamma_rgb(hsv: HSV, gamma: f32) -> RGB {
     let c_vt = c_v * l_vt / l_v;
 
     let l_new = toe_inv(l);
-    c = c * l_new / l;
+    c *= l_new / l;
     l = l_new;
 
     let rgb_scale = oklab_to_linear_srgb(Lab {
@@ -976,10 +1358,11 @@ pub fn okhsv_to_gamma_rgb(hsv: HSV, gamma: f32) -> RGB {
         a: a_ * c_vt,
         b: b_ * c_vt,
     });
-    let scale_l = cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
+    let scale_l =
+        cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
 
-    l = l * scale_l;
-    c = c * scale_l;
+    l *= scale_l;
+    c *= scale_l;
 
     let rgb = oklab_to_linear_srgb(Lab {
         l,
@@ -994,6 +1377,15 @@ pub fn okhsv_to_gamma_rgb(hsv: HSV, gamma: f32) -> RGB {
 }
 
 /// Converts gamma-corrected RGB to OKHSV with custom gamma value
+///
+/// # Parameters
+///
+/// * `rgb` - Gamma-corrected RGB color to convert
+/// * `gamma` - Gamma value (typical: 2.2 for displays, 2.4 for sRGB, 1.8 for Mac)
+///
+/// # Returns
+///
+/// OKHSV color representation
 pub fn gamma_rgb_to_okhsv(rgb: RGB, gamma: f32) -> HSV {
     let lab = linear_srgb_to_oklab(RGB {
         r: gamma_transfer_function_inv(rgb.r, gamma),
@@ -1030,12 +1422,11 @@ pub fn gamma_rgb_to_okhsv(rgb: RGB, gamma: f32) -> HSV {
         a: a_ * c_vt,
         b: b_ * c_vt,
     });
-    let scale_l = cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
+    let scale_l =
+        cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
 
-    l = l / scale_l;
-    let mut c = c / scale_l;
+    l /= scale_l;
 
-    c = c * toe(l) / l;
     l = toe(l);
 
     // we can now compute v and s:
@@ -1068,6 +1459,7 @@ mod tests {
         approx_eq(a.h, b.h, epsilon) && approx_eq(a.s, b.s, epsilon) && approx_eq(a.v, b.v, epsilon)
     }
 
+    #[allow(dead_code)]
     fn lab_approx_eq(a: Lab, b: Lab, epsilon: f32) -> bool {
         approx_eq(a.l, b.l, epsilon) && approx_eq(a.a, b.a, epsilon) && approx_eq(a.b, b.b, epsilon)
     }
@@ -1093,8 +1485,12 @@ mod tests {
         for &val in &values {
             let toe_val = toe(val);
             let recovered = toe_inv(toe_val);
-            assert!(approx_eq(recovered, val, EPSILON),
-                "toe/toe_inv roundtrip failed for {}: got {}", val, recovered);
+            assert!(
+                approx_eq(recovered, val, EPSILON),
+                "toe/toe_inv roundtrip failed for {}: got {}",
+                val,
+                recovered
+            );
         }
     }
 
@@ -1104,8 +1500,12 @@ mod tests {
         for &val in &values {
             let gamma = srgb_transfer_function(val);
             let linear = srgb_transfer_function_inv(gamma);
-            assert!(approx_eq(linear, val, EPSILON),
-                "sRGB transfer roundtrip failed for {}: got {}", val, linear);
+            assert!(
+                approx_eq(linear, val, EPSILON),
+                "sRGB transfer roundtrip failed for {}: got {}",
+                val,
+                linear
+            );
         }
     }
 
@@ -1118,8 +1518,13 @@ mod tests {
             for &val in &values {
                 let corrected = gamma_transfer_function(val, gamma);
                 let linear = gamma_transfer_function_inv(corrected, gamma);
-                assert!(approx_eq(linear, val, EPSILON),
-                    "Gamma {} transfer roundtrip failed for {}: got {}", gamma, val, linear);
+                assert!(
+                    approx_eq(linear, val, EPSILON),
+                    "Gamma {} transfer roundtrip failed for {}: got {}",
+                    gamma,
+                    val,
+                    linear
+                );
             }
         }
     }
@@ -1127,121 +1532,255 @@ mod tests {
     #[test]
     fn test_linear_srgb_oklab_roundtrip() {
         let test_colors = [
-            RGB { r: 1.0, g: 0.0, b: 0.0 },  // Red
-            RGB { r: 0.0, g: 1.0, b: 0.0 },  // Green
-            RGB { r: 0.0, g: 0.0, b: 1.0 },  // Blue
-            RGB { r: 1.0, g: 1.0, b: 1.0 },  // White
-            RGB { r: 0.5, g: 0.5, b: 0.5 },  // Gray
-            RGB { r: 0.3, g: 0.7, b: 0.2 },  // Random
+            RGB {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+            }, // Red
+            RGB {
+                r: 0.0,
+                g: 1.0,
+                b: 0.0,
+            }, // Green
+            RGB {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+            }, // Blue
+            RGB {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+            }, // White
+            RGB {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+            }, // Gray
+            RGB {
+                r: 0.3,
+                g: 0.7,
+                b: 0.2,
+            }, // Random
         ];
 
         for color in &test_colors {
             let lab = linear_srgb_to_oklab(*color);
             let recovered = oklab_to_linear_srgb(lab);
-            assert!(rgb_approx_eq(*color, recovered, 1e-4),
-                "RGB->Oklab->RGB roundtrip failed for {:?}: got {:?}", color, recovered);
+            assert!(
+                rgb_approx_eq(*color, recovered, 1e-4),
+                "RGB->Oklab->RGB roundtrip failed for {:?}: got {:?}",
+                color,
+                recovered
+            );
         }
     }
 
     #[test]
     fn test_okhsl_srgb_black() {
-        let black_hsl = HSL { h: 0.0, s: 0.0, l: 0.0 };
+        let black_hsl = HSL {
+            h: 0.0,
+            s: 0.0,
+            l: 0.0,
+        };
         let rgb = okhsl_to_srgb(black_hsl);
-        assert!(rgb_approx_eq(rgb, RGB { r: 0.0, g: 0.0, b: 0.0 }, EPSILON),
-            "Black OKHSL should convert to black sRGB");
+        assert!(
+            rgb_approx_eq(
+                rgb,
+                RGB {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0
+                },
+                EPSILON
+            ),
+            "Black OKHSL should convert to black sRGB"
+        );
     }
 
     #[test]
     fn test_okhsl_srgb_white() {
-        let white_hsl = HSL { h: 0.0, s: 0.0, l: 1.0 };
+        let white_hsl = HSL {
+            h: 0.0,
+            s: 0.0,
+            l: 1.0,
+        };
         let rgb = okhsl_to_srgb(white_hsl);
-        assert!(rgb_approx_eq(rgb, RGB { r: 1.0, g: 1.0, b: 1.0 }, EPSILON),
-            "White OKHSL should convert to white sRGB");
+        assert!(
+            rgb_approx_eq(
+                rgb,
+                RGB {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0
+                },
+                EPSILON
+            ),
+            "White OKHSL should convert to white sRGB"
+        );
     }
 
     #[test]
     fn test_okhsl_srgb_roundtrip() {
         let test_hsl = [
-            HSL { h: 0.0, s: 1.0, l: 0.5 },   // Red
-            HSL { h: 0.333, s: 1.0, l: 0.5 }, // Green
-            HSL { h: 0.667, s: 1.0, l: 0.5 }, // Blue
-            HSL { h: 0.5, s: 0.5, l: 0.5 },   // Cyan-ish
-            HSL { h: 0.1, s: 0.8, l: 0.6 },   // Orange-ish
+            HSL {
+                h: 0.0,
+                s: 1.0,
+                l: 0.5,
+            }, // Red
+            HSL {
+                h: 0.333,
+                s: 1.0,
+                l: 0.5,
+            }, // Green
+            HSL {
+                h: 0.667,
+                s: 1.0,
+                l: 0.5,
+            }, // Blue
+            HSL {
+                h: 0.5,
+                s: 0.5,
+                l: 0.5,
+            }, // Cyan-ish
+            HSL {
+                h: 0.1,
+                s: 0.8,
+                l: 0.6,
+            }, // Orange-ish
         ];
 
         for hsl in &test_hsl {
             let rgb = okhsl_to_srgb(*hsl);
             let recovered = srgb_to_okhsl(rgb);
-            assert!(hsl_approx_eq(*hsl, recovered, 1e-3),
-                "OKHSL->sRGB->OKHSL roundtrip failed for {:?}: got {:?}", hsl, recovered);
+            assert!(
+                hsl_approx_eq(*hsl, recovered, 1e-3),
+                "OKHSL->sRGB->OKHSL roundtrip failed for {:?}: got {:?}",
+                hsl,
+                recovered
+            );
         }
     }
 
     #[test]
     fn test_okhsv_srgb_roundtrip() {
         let test_hsv = [
-            HSV { h: 0.0, s: 1.0, v: 1.0 },   // Red
-            HSV { h: 0.333, s: 1.0, v: 1.0 }, // Green
-            HSV { h: 0.667, s: 1.0, v: 1.0 }, // Blue
-            HSV { h: 0.5, s: 0.5, v: 0.8 },   // Cyan-ish
-            HSV { h: 0.1, s: 0.8, v: 0.6 },   // Orange-ish
+            HSV {
+                h: 0.0,
+                s: 1.0,
+                v: 1.0,
+            }, // Red
+            HSV {
+                h: 0.333,
+                s: 1.0,
+                v: 1.0,
+            }, // Green
+            HSV {
+                h: 0.667,
+                s: 1.0,
+                v: 1.0,
+            }, // Blue
+            HSV {
+                h: 0.5,
+                s: 0.5,
+                v: 0.8,
+            }, // Cyan-ish
+            HSV {
+                h: 0.1,
+                s: 0.8,
+                v: 0.6,
+            }, // Orange-ish
         ];
 
         for hsv in &test_hsv {
             let rgb = okhsv_to_srgb(*hsv);
             let recovered = srgb_to_okhsv(rgb);
-            assert!(hsv_approx_eq(*hsv, recovered, 1e-3),
-                "OKHSV->sRGB->OKHSV roundtrip failed for {:?}: got {:?}", hsv, recovered);
+            assert!(
+                hsv_approx_eq(*hsv, recovered, 1e-3),
+                "OKHSV->sRGB->OKHSV roundtrip failed for {:?}: got {:?}",
+                hsv,
+                recovered
+            );
         }
     }
 
     #[test]
     fn test_gamma_rgb_conversions() {
-        let linear = RGB { r: 0.5, g: 0.3, b: 0.8 };
+        let linear = RGB {
+            r: 0.5,
+            g: 0.3,
+            b: 0.8,
+        };
         let gamma = 2.2;
 
         let gamma_corrected = linear_rgb_to_gamma_rgb(linear, gamma);
         let recovered = gamma_rgb_to_linear_rgb(gamma_corrected, gamma);
 
-        assert!(rgb_approx_eq(linear, recovered, EPSILON),
-            "Linear->Gamma->Linear roundtrip failed");
+        assert!(
+            rgb_approx_eq(linear, recovered, EPSILON),
+            "Linear->Gamma->Linear roundtrip failed"
+        );
     }
 
     #[test]
     fn test_okhsl_gamma_rgb_roundtrip() {
-        let hsl = HSL { h: 0.5, s: 0.7, l: 0.6 };
+        let hsl = HSL {
+            h: 0.5,
+            s: 0.7,
+            l: 0.6,
+        };
         let gamma = 2.2;
 
         let rgb = okhsl_to_gamma_rgb(hsl, gamma);
         let recovered = gamma_rgb_to_okhsl(rgb, gamma);
 
-        assert!(hsl_approx_eq(hsl, recovered, 1e-3),
-            "OKHSL->Gamma RGB->OKHSL roundtrip failed for gamma {}", gamma);
+        assert!(
+            hsl_approx_eq(hsl, recovered, 1e-3),
+            "OKHSL->Gamma RGB->OKHSL roundtrip failed for gamma {}",
+            gamma
+        );
     }
 
     #[test]
     fn test_okhsv_gamma_rgb_roundtrip() {
-        let hsv = HSV { h: 0.3, s: 0.8, v: 0.7 };
+        let hsv = HSV {
+            h: 0.3,
+            s: 0.8,
+            v: 0.7,
+        };
         let gamma = 2.4;
 
         let rgb = okhsv_to_gamma_rgb(hsv, gamma);
         let recovered = gamma_rgb_to_okhsv(rgb, gamma);
 
-        assert!(hsv_approx_eq(hsv, recovered, 1e-3),
-            "OKHSV->Gamma RGB->OKHSV roundtrip failed for gamma {}", gamma);
+        assert!(
+            hsv_approx_eq(hsv, recovered, 1e-3),
+            "OKHSV->Gamma RGB->OKHSV roundtrip failed for gamma {}",
+            gamma
+        );
     }
 
     #[test]
     fn test_gamut_clip_preserve_chroma_in_gamut() {
-        let in_gamut = RGB { r: 0.5, g: 0.3, b: 0.8 };
+        let in_gamut = RGB {
+            r: 0.5,
+            g: 0.3,
+            b: 0.8,
+        };
         let clipped = gamut_clip_preserve_chroma(in_gamut);
-        assert!(rgb_approx_eq(in_gamut, clipped, EPSILON),
-            "In-gamut color should not be clipped");
+        assert!(
+            rgb_approx_eq(in_gamut, clipped, EPSILON),
+            "In-gamut color should not be clipped"
+        );
     }
 
     #[test]
     fn test_gamut_clip_out_of_gamut() {
-        let out_of_gamut = RGB { r: 1.5, g: -0.2, b: 0.5 };
+        let out_of_gamut = RGB {
+            r: 1.5,
+            g: -0.2,
+            b: 0.5,
+        };
         let clipped = gamut_clip_preserve_chroma(out_of_gamut);
 
         // Should be in valid range
@@ -1252,12 +1791,18 @@ mod tests {
 
     #[test]
     fn test_linear_to_srgb_conversion() {
-        let linear = RGB { r: 0.5, g: 0.3, b: 0.8 };
+        let linear = RGB {
+            r: 0.5,
+            g: 0.3,
+            b: 0.8,
+        };
         let srgb = linear_rgb_to_srgb(linear);
         let recovered = srgb_to_linear_rgb(srgb);
 
-        assert!(rgb_approx_eq(linear, recovered, EPSILON),
-            "linear_rgb_to_srgb/srgb_to_linear_rgb roundtrip failed");
+        assert!(
+            rgb_approx_eq(linear, recovered, EPSILON),
+            "linear_rgb_to_srgb/srgb_to_linear_rgb roundtrip failed"
+        );
     }
 
     #[test]
@@ -1308,7 +1853,11 @@ mod tests {
     #[test]
     fn test_known_color_red() {
         // Pure red in sRGB should have hue near 0
-        let red = RGB { r: 1.0, g: 0.0, b: 0.0 };
+        let red = RGB {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+        };
         let hsl = srgb_to_okhsl(red);
         assert!(hsl.h < 0.1 || hsl.h > 0.9, "Red hue should be near 0/1");
         assert!(hsl.s > 0.5, "Red should be saturated");
@@ -1317,16 +1866,27 @@ mod tests {
     #[test]
     fn test_known_color_green() {
         // Pure green in sRGB
-        let green = RGB { r: 0.0, g: 1.0, b: 0.0 };
+        let green = RGB {
+            r: 0.0,
+            g: 1.0,
+            b: 0.0,
+        };
         let hsl = srgb_to_okhsl(green);
-        assert!(hsl.h > 0.2 && hsl.h < 0.5, "Green hue should be around 0.33");
+        assert!(
+            hsl.h > 0.2 && hsl.h < 0.5,
+            "Green hue should be around 0.33"
+        );
         assert!(hsl.s > 0.5, "Green should be saturated");
     }
 
     #[test]
     fn test_known_color_blue() {
         // Pure blue in sRGB
-        let blue = RGB { r: 0.0, g: 0.0, b: 1.0 };
+        let blue = RGB {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+        };
         let hsl = srgb_to_okhsl(blue);
         assert!(hsl.h > 0.5 && hsl.h < 0.8, "Blue hue should be around 0.67");
         assert!(hsl.s > 0.5, "Blue should be saturated");
@@ -1335,8 +1895,16 @@ mod tests {
     #[test]
     fn test_gray_desaturation() {
         // Gray colors should have very low saturation
-        let gray = RGB { r: 0.5, g: 0.5, b: 0.5 };
+        let gray = RGB {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+        };
         let hsl = srgb_to_okhsl(gray);
-        assert!(hsl.s < 0.01, "Gray should have near-zero saturation, got {}", hsl.s);
+        assert!(
+            hsl.s < 0.01,
+            "Gray should have near-zero saturation, got {}",
+            hsl.s
+        );
     }
 }
