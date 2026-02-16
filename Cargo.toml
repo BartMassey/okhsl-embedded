@@ -1,0 +1,20 @@
+[package]
+name = "okhsl-embedded"
+version = "0.1.0"
+edition = "2021"
+authors = ["Björn Ottosson (original C++)", "Rust translation"]
+license = "MIT"
+description = "no_std Rust translation of OKHSL/OKHSV color space conversions"
+keywords = ["color", "okhsl", "okhsv", "oklab", "no_std"]
+categories = ["no-std", "graphics"]
+
+[dependencies]
+libm = "0.2"
+
+[dev-dependencies]
+# For testing with approximate floating point comparisons
+approx = { version = "0.5", default-features = false }
+
+[lib]
+name = "okhsl_embedded"
+path = "src/lib.rs"

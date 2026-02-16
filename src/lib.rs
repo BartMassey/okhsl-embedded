@@ -1,0 +1,1047 @@
+// Copyright(c) 2021 Björn Ottosson
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files(the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+// of the Software, and to permit persons to whom the Software is furnished to do
+// so, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+#![no_std]
+
+use libm::{atan2f, cbrtf, cosf, fmaxf, fminf, powf, sinf, sqrtf};
+
+#[derive(Debug, Clone, Copy)]
+pub struct Lab {
+    pub l: f32,
+    pub a: f32,
+    pub b: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RGB {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HSV {
+    pub h: f32,
+    pub s: f32,
+    pub v: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HSL {
+    pub h: f32,
+    pub s: f32,
+    pub l: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LC {
+    pub l: f32,
+    pub c: f32,
+}
+
+// Alternative representation of (L_cusp, C_cusp)
+// Encoded so S = C_cusp/L_cusp and T = C_cusp/(1-L_cusp)
+// The maximum value for C in the triangle is then found as fmin(S*L, T*(1-L)), for a given L
+#[derive(Debug, Clone, Copy)]
+pub struct ST {
+    pub s: f32,
+    pub t: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Cs {
+    pub c_0: f32,
+    pub c_mid: f32,
+    pub c_max: f32,
+}
+
+const PI: f32 = 3.1415926535897932384626433832795028841971693993751058209749445923078164062f32;
+
+#[inline]
+fn clamp(x: f32, min: f32, max: f32) -> f32 {
+    if x < min {
+        min
+    } else if x > max {
+        max
+    } else {
+        x
+    }
+}
+
+#[inline]
+fn sgn(x: f32) -> f32 {
+    (0.0f32 < x) as i32 as f32 - (x < 0.0f32) as i32 as f32
+}
+
+#[inline]
+fn srgb_transfer_function(a: f32) -> f32 {
+    if 0.0031308f32 >= a {
+        12.92f32 * a
+    } else {
+        1.055f32 * powf(a, 0.4166666666666667f32) - 0.055f32
+    }
+}
+
+#[inline]
+fn srgb_transfer_function_inv(a: f32) -> f32 {
+    if 0.04045f32 < a {
+        powf((a + 0.055f32) / 1.055f32, 2.4f32)
+    } else {
+        a / 12.92f32
+    }
+}
+
+/// Applies gamma correction to a linear RGB value
+/// gamma: typical values are 2.2 (common for displays), 2.4 (sRGB linear segment), 1.8 (Mac historical)
+#[inline]
+pub fn gamma_transfer_function(a: f32, gamma: f32) -> f32 {
+    if a <= 0.0 {
+        0.0
+    } else {
+        powf(a, 1.0 / gamma)
+    }
+}
+
+/// Converts gamma-corrected RGB to linear RGB
+/// gamma: typical values are 2.2 (common for displays), 2.4 (sRGB linear segment), 1.8 (Mac historical)
+#[inline]
+pub fn gamma_transfer_function_inv(a: f32, gamma: f32) -> f32 {
+    if a <= 0.0 {
+        0.0
+    } else {
+        powf(a, gamma)
+    }
+}
+
+/// Converts linear RGB to gamma-corrected RGB
+pub fn linear_rgb_to_gamma_rgb(rgb: RGB, gamma: f32) -> RGB {
+    RGB {
+        r: gamma_transfer_function(rgb.r, gamma),
+        g: gamma_transfer_function(rgb.g, gamma),
+        b: gamma_transfer_function(rgb.b, gamma),
+    }
+}
+
+/// Converts gamma-corrected RGB to linear RGB
+pub fn gamma_rgb_to_linear_rgb(rgb: RGB, gamma: f32) -> RGB {
+    RGB {
+        r: gamma_transfer_function_inv(rgb.r, gamma),
+        g: gamma_transfer_function_inv(rgb.g, gamma),
+        b: gamma_transfer_function_inv(rgb.b, gamma),
+    }
+}
+
+/// Converts linear RGB to standard sRGB (convenience function)
+pub fn linear_rgb_to_srgb(rgb: RGB) -> RGB {
+    RGB {
+        r: srgb_transfer_function(rgb.r),
+        g: srgb_transfer_function(rgb.g),
+        b: srgb_transfer_function(rgb.b),
+    }
+}
+
+/// Converts standard sRGB to linear RGB (convenience function)
+pub fn srgb_to_linear_rgb(rgb: RGB) -> RGB {
+    RGB {
+        r: srgb_transfer_function_inv(rgb.r),
+        g: srgb_transfer_function_inv(rgb.g),
+        b: srgb_transfer_function_inv(rgb.b),
+    }
+}
+
+pub fn linear_srgb_to_oklab(c: RGB) -> Lab {
+    let l = 0.4122214708f32 * c.r + 0.5363325363f32 * c.g + 0.0514459929f32 * c.b;
+    let m = 0.2119034982f32 * c.r + 0.6806995451f32 * c.g + 0.1073969566f32 * c.b;
+    let s = 0.0883024619f32 * c.r + 0.2817188376f32 * c.g + 0.6299787005f32 * c.b;
+
+    let l_ = cbrtf(l);
+    let m_ = cbrtf(m);
+    let s_ = cbrtf(s);
+
+    Lab {
+        l: 0.2104542553f32 * l_ + 0.7936177850f32 * m_ - 0.0040720468f32 * s_,
+        a: 1.9779984951f32 * l_ - 2.4285922050f32 * m_ + 0.4505937099f32 * s_,
+        b: 0.0259040371f32 * l_ + 0.7827717662f32 * m_ - 0.8086757660f32 * s_,
+    }
+}
+
+pub fn oklab_to_linear_srgb(c: Lab) -> RGB {
+    let l_ = c.l + 0.3963377774f32 * c.a + 0.2158037573f32 * c.b;
+    let m_ = c.l - 0.1055613458f32 * c.a - 0.0638541728f32 * c.b;
+    let s_ = c.l - 0.0894841775f32 * c.a - 1.2914855480f32 * c.b;
+
+    let l = l_ * l_ * l_;
+    let m = m_ * m_ * m_;
+    let s = s_ * s_ * s_;
+
+    RGB {
+        r: 4.0767416621f32 * l - 3.3077115913f32 * m + 0.2309699292f32 * s,
+        g: -1.2684380046f32 * l + 2.6097574011f32 * m - 0.3413193965f32 * s,
+        b: -0.0041960863f32 * l - 0.7034186147f32 * m + 1.7076147010f32 * s,
+    }
+}
+
+// Finds the maximum saturation possible for a given hue that fits in sRGB
+// Saturation here is defined as S = C/L
+// a and b must be normalized so a^2 + b^2 == 1
+pub fn compute_max_saturation(a: f32, b: f32) -> f32 {
+    // Max saturation will be when one of r, g or b goes below zero.
+
+    // Select different coefficients depending on which component goes below zero first
+    let (k0, k1, k2, k3, k4, wl, wm, ws) = if -1.88170328f32 * a - 0.80936493f32 * b > 1.0 {
+        // Red component
+        (
+            1.19086277f32,
+            1.76576728f32,
+            0.59662641f32,
+            0.75515197f32,
+            0.56771245f32,
+            4.0767416621f32,
+            -3.3077115913f32,
+            0.2309699292f32,
+        )
+    } else if 1.81444104f32 * a - 1.19445276f32 * b > 1.0 {
+        // Green component
+        (
+            0.73956515f32,
+            -0.45954404f32,
+            0.08285427f32,
+            0.12541070f32,
+            0.14503204f32,
+            -1.2684380046f32,
+            2.6097574011f32,
+            -0.3413193965f32,
+        )
+    } else {
+        // Blue component
+        (
+            1.35733652f32,
+            -0.00915799f32,
+            -1.15130210f32,
+            -0.50559606f32,
+            0.00692167f32,
+            -0.0041960863f32,
+            -0.7034186147f32,
+            1.7076147010f32,
+        )
+    };
+
+    // Approximate max saturation using a polynomial:
+    let mut s = k0 + k1 * a + k2 * b + k3 * a * a + k4 * a * b;
+
+    // Do one step Halley's method to get closer
+    // this gives an error less than 10e6, except for some blue hues where the dS/dh is close to infinite
+    // this should be sufficient for most applications, otherwise do two/three steps
+
+    let k_l = 0.3963377774f32 * a + 0.2158037573f32 * b;
+    let k_m = -0.1055613458f32 * a - 0.0638541728f32 * b;
+    let k_s = -0.0894841775f32 * a - 1.2914855480f32 * b;
+
+    {
+        let l_ = 1.0f32 + s * k_l;
+        let m_ = 1.0f32 + s * k_m;
+        let s_ = 1.0f32 + s * k_s;
+
+        let l = l_ * l_ * l_;
+        let m = m_ * m_ * m_;
+        let s_val = s_ * s_ * s_;
+
+        let l_ds = 3.0f32 * k_l * l_ * l_;
+        let m_ds = 3.0f32 * k_m * m_ * m_;
+        let s_ds = 3.0f32 * k_s * s_ * s_;
+
+        let l_ds2 = 6.0f32 * k_l * k_l * l_;
+        let m_ds2 = 6.0f32 * k_m * k_m * m_;
+        let s_ds2 = 6.0f32 * k_s * k_s * s_;
+
+        let f = wl * l + wm * m + ws * s_val;
+        let f1 = wl * l_ds + wm * m_ds + ws * s_ds;
+        let f2 = wl * l_ds2 + wm * m_ds2 + ws * s_ds2;
+
+        s = s - f * f1 / (f1 * f1 - 0.5f32 * f * f2);
+    }
+
+    s
+}
+
+// finds L_cusp and C_cusp for a given hue
+// a and b must be normalized so a^2 + b^2 == 1
+pub fn find_cusp(a: f32, b: f32) -> LC {
+    // First, find the maximum saturation (saturation S = C/L)
+    let s_cusp = compute_max_saturation(a, b);
+
+    // Convert to linear sRGB to find the first point where at least one of r,g or b >= 1:
+    let rgb_at_max = oklab_to_linear_srgb(Lab {
+        l: 1.0,
+        a: s_cusp * a,
+        b: s_cusp * b,
+    });
+    let l_cusp = cbrtf(1.0f32 / fmaxf(fmaxf(rgb_at_max.r, rgb_at_max.g), rgb_at_max.b));
+    let c_cusp = l_cusp * s_cusp;
+
+    LC {
+        l: l_cusp,
+        c: c_cusp,
+    }
+}
+
+// Finds intersection of the line defined by
+// L = L0 * (1 - t) + t * L1;
+// C = t * C1;
+// a and b must be normalized so a^2 + b^2 == 1
+pub fn find_gamut_intersection(a: f32, b: f32, l1: f32, c1: f32, l0: f32, cusp: LC) -> f32 {
+    // Find the intersection for upper and lower half separately
+    let mut t = if ((l1 - l0) * cusp.c - (cusp.l - l0) * c1) <= 0.0f32 {
+        // Lower half
+        cusp.c * l0 / (c1 * cusp.l + cusp.c * (l0 - l1))
+    } else {
+        // Upper half
+
+        // First intersect with triangle
+        let mut t_val = cusp.c * (l0 - 1.0f32) / (c1 * (cusp.l - 1.0f32) + cusp.c * (l0 - l1));
+
+        // Then one step Halley's method
+        {
+            let dl = l1 - l0;
+            let dc = c1;
+
+            let k_l = 0.3963377774f32 * a + 0.2158037573f32 * b;
+            let k_m = -0.1055613458f32 * a - 0.0638541728f32 * b;
+            let k_s = -0.0894841775f32 * a - 1.2914855480f32 * b;
+
+            let l_dt = dl + dc * k_l;
+            let m_dt = dl + dc * k_m;
+            let s_dt = dl + dc * k_s;
+
+            // If higher accuracy is required, 2 or 3 iterations of the following block can be used:
+            {
+                let l = l0 * (1.0f32 - t_val) + t_val * l1;
+                let c = t_val * c1;
+
+                let l_ = l + c * k_l;
+                let m_ = l + c * k_m;
+                let s_ = l + c * k_s;
+
+                let l = l_ * l_ * l_;
+                let m = m_ * m_ * m_;
+                let s = s_ * s_ * s_;
+
+                let ldt = 3.0 * l_dt * l_ * l_;
+                let mdt = 3.0 * m_dt * m_ * m_;
+                let sdt = 3.0 * s_dt * s_ * s_;
+
+                let ldt2 = 6.0 * l_dt * l_dt * l_;
+                let mdt2 = 6.0 * m_dt * m_dt * m_;
+                let sdt2 = 6.0 * s_dt * s_dt * s_;
+
+                let r = 4.0767416621f32 * l - 3.3077115913f32 * m + 0.2309699292f32 * s - 1.0;
+                let r1 = 4.0767416621f32 * ldt - 3.3077115913f32 * mdt + 0.2309699292f32 * sdt;
+                let r2 = 4.0767416621f32 * ldt2 - 3.3077115913f32 * mdt2 + 0.2309699292f32 * sdt2;
+
+                let u_r = r1 / (r1 * r1 - 0.5f32 * r * r2);
+                let t_r = -r * u_r;
+
+                let g = -1.2684380046f32 * l + 2.6097574011f32 * m - 0.3413193965f32 * s - 1.0;
+                let g1 = -1.2684380046f32 * ldt + 2.6097574011f32 * mdt - 0.3413193965f32 * sdt;
+                let g2 = -1.2684380046f32 * ldt2 + 2.6097574011f32 * mdt2 - 0.3413193965f32 * sdt2;
+
+                let u_g = g1 / (g1 * g1 - 0.5f32 * g * g2);
+                let t_g = -g * u_g;
+
+                let b_val = -0.0041960863f32 * l - 0.7034186147f32 * m + 1.7076147010f32 * s - 1.0;
+                let b1 = -0.0041960863f32 * ldt - 0.7034186147f32 * mdt + 1.7076147010f32 * sdt;
+                let b2 = -0.0041960863f32 * ldt2 - 0.7034186147f32 * mdt2 + 1.7076147010f32 * sdt2;
+
+                let u_b = b1 / (b1 * b1 - 0.5f32 * b_val * b2);
+                let t_b = -b_val * u_b;
+
+                let t_r = if u_r >= 0.0f32 { t_r } else { f32::MAX };
+                let t_g = if u_g >= 0.0f32 { t_g } else { f32::MAX };
+                let t_b = if u_b >= 0.0f32 { t_b } else { f32::MAX };
+
+                t_val += fminf(t_r, fminf(t_g, t_b));
+            }
+        }
+
+        t_val
+    };
+
+    t
+}
+
+pub fn find_gamut_intersection_simple(a: f32, b: f32, l1: f32, c1: f32, l0: f32) -> f32 {
+    // Find the cusp of the gamut triangle
+    let cusp = find_cusp(a, b);
+
+    find_gamut_intersection(a, b, l1, c1, l0, cusp)
+}
+
+pub fn gamut_clip_preserve_chroma(rgb: RGB) -> RGB {
+    if rgb.r < 1.0 && rgb.g < 1.0 && rgb.b < 1.0 && rgb.r > 0.0 && rgb.g > 0.0 && rgb.b > 0.0 {
+        return rgb;
+    }
+
+    let lab = linear_srgb_to_oklab(rgb);
+
+    let l = lab.l;
+    let eps = 0.00001f32;
+    let c = fmaxf(eps, sqrtf(lab.a * lab.a + lab.b * lab.b));
+    let a_ = lab.a / c;
+    let b_ = lab.b / c;
+
+    let l0 = clamp(l, 0.0, 1.0);
+
+    let t = find_gamut_intersection_simple(a_, b_, l, c, l0);
+    let l_clipped = l0 * (1.0 - t) + t * l;
+    let c_clipped = t * c;
+
+    oklab_to_linear_srgb(Lab {
+        l: l_clipped,
+        a: c_clipped * a_,
+        b: c_clipped * b_,
+    })
+}
+
+pub fn gamut_clip_project_to_0_5(rgb: RGB) -> RGB {
+    if rgb.r < 1.0 && rgb.g < 1.0 && rgb.b < 1.0 && rgb.r > 0.0 && rgb.g > 0.0 && rgb.b > 0.0 {
+        return rgb;
+    }
+
+    let lab = linear_srgb_to_oklab(rgb);
+
+    let l = lab.l;
+    let eps = 0.00001f32;
+    let c = fmaxf(eps, sqrtf(lab.a * lab.a + lab.b * lab.b));
+    let a_ = lab.a / c;
+    let b_ = lab.b / c;
+
+    let l0 = 0.5;
+
+    let t = find_gamut_intersection_simple(a_, b_, l, c, l0);
+    let l_clipped = l0 * (1.0 - t) + t * l;
+    let c_clipped = t * c;
+
+    oklab_to_linear_srgb(Lab {
+        l: l_clipped,
+        a: c_clipped * a_,
+        b: c_clipped * b_,
+    })
+}
+
+pub fn gamut_clip_project_to_l_cusp(rgb: RGB) -> RGB {
+    if rgb.r < 1.0 && rgb.g < 1.0 && rgb.b < 1.0 && rgb.r > 0.0 && rgb.g > 0.0 && rgb.b > 0.0 {
+        return rgb;
+    }
+
+    let lab = linear_srgb_to_oklab(rgb);
+
+    let l = lab.l;
+    let eps = 0.00001f32;
+    let c = fmaxf(eps, sqrtf(lab.a * lab.a + lab.b * lab.b));
+    let a_ = lab.a / c;
+    let b_ = lab.b / c;
+
+    // The cusp is computed here and in find_gamut_intersection, an optimized solution would only compute it once.
+    let cusp = find_cusp(a_, b_);
+
+    let l0 = cusp.l;
+
+    let t = find_gamut_intersection(a_, b_, l, c, l0, cusp);
+
+    let l_clipped = l0 * (1.0 - t) + t * l;
+    let c_clipped = t * c;
+
+    oklab_to_linear_srgb(Lab {
+        l: l_clipped,
+        a: c_clipped * a_,
+        b: c_clipped * b_,
+    })
+}
+
+pub fn gamut_clip_adaptive_l0_0_5(rgb: RGB, alpha: f32) -> RGB {
+    if rgb.r < 1.0 && rgb.g < 1.0 && rgb.b < 1.0 && rgb.r > 0.0 && rgb.g > 0.0 && rgb.b > 0.0 {
+        return rgb;
+    }
+
+    let lab = linear_srgb_to_oklab(rgb);
+
+    let l = lab.l;
+    let eps = 0.00001f32;
+    let c = fmaxf(eps, sqrtf(lab.a * lab.a + lab.b * lab.b));
+    let a_ = lab.a / c;
+    let b_ = lab.b / c;
+
+    let ld = l - 0.5f32;
+    let e1 = 0.5f32 + libm::fabsf(ld) + alpha * c;
+    let l0 = 0.5f32 * (1.0f32 + sgn(ld) * (e1 - sqrtf(e1 * e1 - 2.0f32 * libm::fabsf(ld))));
+
+    let t = find_gamut_intersection_simple(a_, b_, l, c, l0);
+    let l_clipped = l0 * (1.0f32 - t) + t * l;
+    let c_clipped = t * c;
+
+    oklab_to_linear_srgb(Lab {
+        l: l_clipped,
+        a: c_clipped * a_,
+        b: c_clipped * b_,
+    })
+}
+
+pub fn gamut_clip_adaptive_l0_l_cusp(rgb: RGB, alpha: f32) -> RGB {
+    if rgb.r < 1.0 && rgb.g < 1.0 && rgb.b < 1.0 && rgb.r > 0.0 && rgb.g > 0.0 && rgb.b > 0.0 {
+        return rgb;
+    }
+
+    let lab = linear_srgb_to_oklab(rgb);
+
+    let l = lab.l;
+    let eps = 0.00001f32;
+    let c = fmaxf(eps, sqrtf(lab.a * lab.a + lab.b * lab.b));
+    let a_ = lab.a / c;
+    let b_ = lab.b / c;
+
+    // The cusp is computed here and in find_gamut_intersection, an optimized solution would only compute it once.
+    let cusp = find_cusp(a_, b_);
+
+    let ld = l - cusp.l;
+    let k = 2.0f32 * if ld > 0.0 { 1.0f32 - cusp.l } else { cusp.l };
+
+    let e1 = 0.5f32 * k + libm::fabsf(ld) + alpha * c / k;
+    let l0 = cusp.l + 0.5f32 * (sgn(ld) * (e1 - sqrtf(e1 * e1 - 2.0f32 * k * libm::fabsf(ld))));
+
+    let t = find_gamut_intersection(a_, b_, l, c, l0, cusp);
+    let l_clipped = l0 * (1.0f32 - t) + t * l;
+    let c_clipped = t * c;
+
+    oklab_to_linear_srgb(Lab {
+        l: l_clipped,
+        a: c_clipped * a_,
+        b: c_clipped * b_,
+    })
+}
+
+#[inline]
+fn toe(x: f32) -> f32 {
+    const K_1: f32 = 0.206f32;
+    const K_2: f32 = 0.03f32;
+    const K_3: f32 = (1.0f32 + K_1) / (1.0f32 + K_2);
+    0.5f32 * (K_3 * x - K_1 + sqrtf((K_3 * x - K_1) * (K_3 * x - K_1) + 4.0 * K_2 * K_3 * x))
+}
+
+#[inline]
+fn toe_inv(x: f32) -> f32 {
+    const K_1: f32 = 0.206f32;
+    const K_2: f32 = 0.03f32;
+    const K_3: f32 = (1.0f32 + K_1) / (1.0f32 + K_2);
+    (x * x + K_1 * x) / (K_3 * (x + K_2))
+}
+
+pub fn to_st(cusp: LC) -> ST {
+    let l = cusp.l;
+    let c = cusp.c;
+    ST {
+        s: c / l,
+        t: c / (1.0 - l),
+    }
+}
+
+// Returns a smooth approximation of the location of the cusp
+// This polynomial was created by an optimization process
+// It has been designed so that S_mid < S_max and T_mid < T_max
+pub fn get_st_mid(a_: f32, b_: f32) -> ST {
+    let s = 0.11516993f32
+        + 1.0f32
+            / (7.44778970f32 + 4.15901240f32 * b_
+                + a_
+                    * (-2.19557347f32 + 1.75198401f32 * b_
+                        + a_
+                            * (-2.13704948f32 - 10.02301043f32 * b_
+                                + a_ * (-4.24894561f32 + 5.38770819f32 * b_ + 4.69891013f32 * a_))));
+
+    let t = 0.11239642f32
+        + 1.0f32
+            / (1.61320320f32 - 0.68124379f32 * b_
+                + a_
+                    * (0.40370612f32 + 0.90148123f32 * b_
+                        + a_
+                            * (-0.27087943f32 + 0.61223990f32 * b_
+                                + a_ * (0.00299215f32 - 0.45399568f32 * b_ - 0.14661872f32 * a_))));
+
+    ST { s, t }
+}
+
+pub fn get_cs(l: f32, a_: f32, b_: f32) -> Cs {
+    let cusp = find_cusp(a_, b_);
+
+    let c_max = find_gamut_intersection(a_, b_, l, 1.0, l, cusp);
+    let st_max = to_st(cusp);
+
+    // Scale factor to compensate for the curved part of gamut shape:
+    let k = c_max / fminf(l * st_max.s, (1.0 - l) * st_max.t);
+
+    let c_mid = {
+        let st_mid = get_st_mid(a_, b_);
+
+        // Use a soft minimum function, instead of a sharp triangle shape to get a smooth value for chroma.
+        let c_a = l * st_mid.s;
+        let c_b = (1.0f32 - l) * st_mid.t;
+        0.9f32
+            * k
+            * sqrtf(sqrtf(
+                1.0f32 / (1.0f32 / (c_a * c_a * c_a * c_a) + 1.0f32 / (c_b * c_b * c_b * c_b)),
+            ))
+    };
+
+    let c_0 = {
+        // for C_0, the shape is independent of hue, so ST are constant. Values picked to roughly be the average values of ST.
+        let c_a = l * 0.4f32;
+        let c_b = (1.0f32 - l) * 0.8f32;
+
+        // Use a soft minimum function, instead of a sharp triangle shape to get a smooth value for chroma.
+        sqrtf(1.0f32 / (1.0f32 / (c_a * c_a) + 1.0f32 / (c_b * c_b)))
+    };
+
+    Cs {
+        c_0,
+        c_mid,
+        c_max,
+    }
+}
+
+pub fn okhsl_to_srgb(hsl: HSL) -> RGB {
+    let h = hsl.h;
+    let s = hsl.s;
+    let l = hsl.l;
+
+    if l == 1.0f32 {
+        return RGB {
+            r: 1.0f32,
+            g: 1.0f32,
+            b: 1.0f32,
+        };
+    } else if l == 0.0f32 {
+        return RGB {
+            r: 0.0f32,
+            g: 0.0f32,
+            b: 0.0f32,
+        };
+    }
+
+    let a_ = cosf(2.0f32 * PI * h);
+    let b_ = sinf(2.0f32 * PI * h);
+    let l_val = toe_inv(l);
+
+    let cs = get_cs(l_val, a_, b_);
+    let c_0 = cs.c_0;
+    let c_mid = cs.c_mid;
+    let c_max = cs.c_max;
+
+    let mid = 0.8f32;
+    let mid_inv = 1.25f32;
+
+    let c = if s < mid {
+        let t = mid_inv * s;
+
+        let k_1 = mid * c_0;
+        let k_2 = 1.0f32 - k_1 / c_mid;
+
+        t * k_1 / (1.0f32 - k_2 * t)
+    } else {
+        let t = (s - mid) / (1.0 - mid);
+
+        let k_0 = c_mid;
+        let k_1 = (1.0f32 - mid) * c_mid * c_mid * mid_inv * mid_inv / c_0;
+        let k_2 = 1.0f32 - k_1 / (c_max - c_mid);
+
+        k_0 + t * k_1 / (1.0f32 - k_2 * t)
+    };
+
+    let rgb = oklab_to_linear_srgb(Lab {
+        l: l_val,
+        a: c * a_,
+        b: c * b_,
+    });
+    RGB {
+        r: srgb_transfer_function(rgb.r),
+        g: srgb_transfer_function(rgb.g),
+        b: srgb_transfer_function(rgb.b),
+    }
+}
+
+pub fn srgb_to_okhsl(rgb: RGB) -> HSL {
+    let lab = linear_srgb_to_oklab(RGB {
+        r: srgb_transfer_function_inv(rgb.r),
+        g: srgb_transfer_function_inv(rgb.g),
+        b: srgb_transfer_function_inv(rgb.b),
+    });
+
+    let c = sqrtf(lab.a * lab.a + lab.b * lab.b);
+    let a_ = lab.a / c;
+    let b_ = lab.b / c;
+
+    let l = lab.l;
+    let h = 0.5f32 + 0.5f32 * atan2f(-lab.b, -lab.a) / PI;
+
+    let cs = get_cs(l, a_, b_);
+    let c_0 = cs.c_0;
+    let c_mid = cs.c_mid;
+    let c_max = cs.c_max;
+
+    // Inverse of the interpolation in okhsl_to_srgb:
+
+    let mid = 0.8f32;
+    let mid_inv = 1.25f32;
+
+    let s = if c < c_mid {
+        let k_1 = mid * c_0;
+        let k_2 = 1.0f32 - k_1 / c_mid;
+
+        let t = c / (k_1 + k_2 * c);
+        t * mid
+    } else {
+        let k_0 = c_mid;
+        let k_1 = (1.0f32 - mid) * c_mid * c_mid * mid_inv * mid_inv / c_0;
+        let k_2 = 1.0f32 - k_1 / (c_max - c_mid);
+
+        let t = (c - k_0) / (k_1 + k_2 * (c - k_0));
+        mid + (1.0f32 - mid) * t
+    };
+
+    let l = toe(l);
+    HSL { h, s, l }
+}
+
+pub fn okhsv_to_srgb(hsv: HSV) -> RGB {
+    let h = hsv.h;
+    let s = hsv.s;
+    let v = hsv.v;
+
+    let a_ = cosf(2.0f32 * PI * h);
+    let b_ = sinf(2.0f32 * PI * h);
+
+    let cusp = find_cusp(a_, b_);
+    let st_max = to_st(cusp);
+    let s_max = st_max.s;
+    let t_max = st_max.t;
+    let s_0 = 0.5f32;
+    let k = 1.0 - s_0 / s_max;
+
+    // first we compute L and V as if the gamut is a perfect triangle:
+
+    // L, C when v==1:
+    let l_v = 1.0 - s * s_0 / (s_0 + t_max - t_max * k * s);
+    let c_v = s * t_max * s_0 / (s_0 + t_max - t_max * k * s);
+
+    let mut l = v * l_v;
+    let mut c = v * c_v;
+
+    // then we compensate for both toe and the curved top part of the triangle:
+    let l_vt = toe_inv(l_v);
+    let c_vt = c_v * l_vt / l_v;
+
+    let l_new = toe_inv(l);
+    c = c * l_new / l;
+    l = l_new;
+
+    let rgb_scale = oklab_to_linear_srgb(Lab {
+        l: l_vt,
+        a: a_ * c_vt,
+        b: b_ * c_vt,
+    });
+    let scale_l = cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
+
+    l = l * scale_l;
+    c = c * scale_l;
+
+    let rgb = oklab_to_linear_srgb(Lab {
+        l,
+        a: c * a_,
+        b: c * b_,
+    });
+    RGB {
+        r: srgb_transfer_function(rgb.r),
+        g: srgb_transfer_function(rgb.g),
+        b: srgb_transfer_function(rgb.b),
+    }
+}
+
+pub fn srgb_to_okhsv(rgb: RGB) -> HSV {
+    let lab = linear_srgb_to_oklab(RGB {
+        r: srgb_transfer_function_inv(rgb.r),
+        g: srgb_transfer_function_inv(rgb.g),
+        b: srgb_transfer_function_inv(rgb.b),
+    });
+
+    let c = sqrtf(lab.a * lab.a + lab.b * lab.b);
+    let a_ = lab.a / c;
+    let b_ = lab.b / c;
+
+    let mut l = lab.l;
+    let h = 0.5f32 + 0.5f32 * atan2f(-lab.b, -lab.a) / PI;
+
+    let cusp = find_cusp(a_, b_);
+    let st_max = to_st(cusp);
+    let s_max = st_max.s;
+    let t_max = st_max.t;
+    let s_0 = 0.5f32;
+    let k = 1.0 - s_0 / s_max;
+
+    // first we find L_v, C_v, L_vt and C_vt
+
+    let t = t_max / (c + l * t_max);
+    let l_v = t * l;
+    let c_v = t * c;
+
+    let l_vt = toe_inv(l_v);
+    let c_vt = c_v * l_vt / l_v;
+
+    // we can then use these to invert the step that compensates for the toe and the curved top part of the triangle:
+    let rgb_scale = oklab_to_linear_srgb(Lab {
+        l: l_vt,
+        a: a_ * c_vt,
+        b: b_ * c_vt,
+    });
+    let scale_l = cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
+
+    l = l / scale_l;
+    let mut c = c / scale_l;
+
+    c = c * toe(l) / l;
+    l = toe(l);
+
+    // we can now compute v and s:
+
+    let v = l / l_v;
+    let s = (s_0 + t_max) * c_v / ((t_max * s_0) + t_max * k * c_v);
+
+    HSV { h, s, v }
+}
+
+// Gamma-corrected RGB conversion functions
+
+/// Converts OKHSL to gamma-corrected RGB with custom gamma value
+pub fn okhsl_to_gamma_rgb(hsl: HSL, gamma: f32) -> RGB {
+    let h = hsl.h;
+    let s = hsl.s;
+    let l = hsl.l;
+
+    if l == 1.0f32 {
+        return RGB {
+            r: 1.0f32,
+            g: 1.0f32,
+            b: 1.0f32,
+        };
+    } else if l == 0.0f32 {
+        return RGB {
+            r: 0.0f32,
+            g: 0.0f32,
+            b: 0.0f32,
+        };
+    }
+
+    let a_ = cosf(2.0f32 * PI * h);
+    let b_ = sinf(2.0f32 * PI * h);
+    let l_val = toe_inv(l);
+
+    let cs = get_cs(l_val, a_, b_);
+    let c_0 = cs.c_0;
+    let c_mid = cs.c_mid;
+    let c_max = cs.c_max;
+
+    let mid = 0.8f32;
+    let mid_inv = 1.25f32;
+
+    let c = if s < mid {
+        let t = mid_inv * s;
+
+        let k_1 = mid * c_0;
+        let k_2 = 1.0f32 - k_1 / c_mid;
+
+        t * k_1 / (1.0f32 - k_2 * t)
+    } else {
+        let t = (s - mid) / (1.0 - mid);
+
+        let k_0 = c_mid;
+        let k_1 = (1.0f32 - mid) * c_mid * c_mid * mid_inv * mid_inv / c_0;
+        let k_2 = 1.0f32 - k_1 / (c_max - c_mid);
+
+        k_0 + t * k_1 / (1.0f32 - k_2 * t)
+    };
+
+    let rgb = oklab_to_linear_srgb(Lab {
+        l: l_val,
+        a: c * a_,
+        b: c * b_,
+    });
+    RGB {
+        r: gamma_transfer_function(rgb.r, gamma),
+        g: gamma_transfer_function(rgb.g, gamma),
+        b: gamma_transfer_function(rgb.b, gamma),
+    }
+}
+
+/// Converts gamma-corrected RGB to OKHSL with custom gamma value
+pub fn gamma_rgb_to_okhsl(rgb: RGB, gamma: f32) -> HSL {
+    let lab = linear_srgb_to_oklab(RGB {
+        r: gamma_transfer_function_inv(rgb.r, gamma),
+        g: gamma_transfer_function_inv(rgb.g, gamma),
+        b: gamma_transfer_function_inv(rgb.b, gamma),
+    });
+
+    let c = sqrtf(lab.a * lab.a + lab.b * lab.b);
+    let a_ = lab.a / c;
+    let b_ = lab.b / c;
+
+    let l = lab.l;
+    let h = 0.5f32 + 0.5f32 * atan2f(-lab.b, -lab.a) / PI;
+
+    let cs = get_cs(l, a_, b_);
+    let c_0 = cs.c_0;
+    let c_mid = cs.c_mid;
+    let c_max = cs.c_max;
+
+    // Inverse of the interpolation in okhsl_to_gamma_rgb:
+
+    let mid = 0.8f32;
+    let mid_inv = 1.25f32;
+
+    let s = if c < c_mid {
+        let k_1 = mid * c_0;
+        let k_2 = 1.0f32 - k_1 / c_mid;
+
+        let t = c / (k_1 + k_2 * c);
+        t * mid
+    } else {
+        let k_0 = c_mid;
+        let k_1 = (1.0f32 - mid) * c_mid * c_mid * mid_inv * mid_inv / c_0;
+        let k_2 = 1.0f32 - k_1 / (c_max - c_mid);
+
+        let t = (c - k_0) / (k_1 + k_2 * (c - k_0));
+        mid + (1.0f32 - mid) * t
+    };
+
+    let l = toe(l);
+    HSL { h, s, l }
+}
+
+/// Converts OKHSV to gamma-corrected RGB with custom gamma value
+pub fn okhsv_to_gamma_rgb(hsv: HSV, gamma: f32) -> RGB {
+    let h = hsv.h;
+    let s = hsv.s;
+    let v = hsv.v;
+
+    let a_ = cosf(2.0f32 * PI * h);
+    let b_ = sinf(2.0f32 * PI * h);
+
+    let cusp = find_cusp(a_, b_);
+    let st_max = to_st(cusp);
+    let s_max = st_max.s;
+    let t_max = st_max.t;
+    let s_0 = 0.5f32;
+    let k = 1.0 - s_0 / s_max;
+
+    // first we compute L and V as if the gamut is a perfect triangle:
+
+    // L, C when v==1:
+    let l_v = 1.0 - s * s_0 / (s_0 + t_max - t_max * k * s);
+    let c_v = s * t_max * s_0 / (s_0 + t_max - t_max * k * s);
+
+    let mut l = v * l_v;
+    let mut c = v * c_v;
+
+    // then we compensate for both toe and the curved top part of the triangle:
+    let l_vt = toe_inv(l_v);
+    let c_vt = c_v * l_vt / l_v;
+
+    let l_new = toe_inv(l);
+    c = c * l_new / l;
+    l = l_new;
+
+    let rgb_scale = oklab_to_linear_srgb(Lab {
+        l: l_vt,
+        a: a_ * c_vt,
+        b: b_ * c_vt,
+    });
+    let scale_l = cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
+
+    l = l * scale_l;
+    c = c * scale_l;
+
+    let rgb = oklab_to_linear_srgb(Lab {
+        l,
+        a: c * a_,
+        b: c * b_,
+    });
+    RGB {
+        r: gamma_transfer_function(rgb.r, gamma),
+        g: gamma_transfer_function(rgb.g, gamma),
+        b: gamma_transfer_function(rgb.b, gamma),
+    }
+}
+
+/// Converts gamma-corrected RGB to OKHSV with custom gamma value
+pub fn gamma_rgb_to_okhsv(rgb: RGB, gamma: f32) -> HSV {
+    let lab = linear_srgb_to_oklab(RGB {
+        r: gamma_transfer_function_inv(rgb.r, gamma),
+        g: gamma_transfer_function_inv(rgb.g, gamma),
+        b: gamma_transfer_function_inv(rgb.b, gamma),
+    });
+
+    let c = sqrtf(lab.a * lab.a + lab.b * lab.b);
+    let a_ = lab.a / c;
+    let b_ = lab.b / c;
+
+    let mut l = lab.l;
+    let h = 0.5f32 + 0.5f32 * atan2f(-lab.b, -lab.a) / PI;
+
+    let cusp = find_cusp(a_, b_);
+    let st_max = to_st(cusp);
+    let s_max = st_max.s;
+    let t_max = st_max.t;
+    let s_0 = 0.5f32;
+    let k = 1.0 - s_0 / s_max;
+
+    // first we find L_v, C_v, L_vt and C_vt
+
+    let t = t_max / (c + l * t_max);
+    let l_v = t * l;
+    let c_v = t * c;
+
+    let l_vt = toe_inv(l_v);
+    let c_vt = c_v * l_vt / l_v;
+
+    // we can then use these to invert the step that compensates for the toe and the curved top part of the triangle:
+    let rgb_scale = oklab_to_linear_srgb(Lab {
+        l: l_vt,
+        a: a_ * c_vt,
+        b: b_ * c_vt,
+    });
+    let scale_l = cbrtf(1.0f32 / fmaxf(fmaxf(rgb_scale.r, rgb_scale.g), fmaxf(rgb_scale.b, 0.0f32)));
+
+    l = l / scale_l;
+    let mut c = c / scale_l;
+
+    c = c * toe(l) / l;
+    l = toe(l);
+
+    // we can now compute v and s:
+
+    let v = l / l_v;
+    let s = (s_0 + t_max) * c_v / ((t_max * s_0) + t_max * k * c_v);
+
+    HSV { h, s, v }
+}
