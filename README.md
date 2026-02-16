@@ -3,7 +3,9 @@ Bart Massey 2026
 
 A `no_std` Rust implementation of OKHSL and OKHSV color
 space conversions with f32 floats, derived from Björn
-Ottosson's C++ `ok_color` code.
+Ottosson's C++ `ok_color` code. See [Ottosson's blog
+post](https://bottosson.github.io/posts/colorpicker/) about
+color picking for more information.
 
 ## Features
 
